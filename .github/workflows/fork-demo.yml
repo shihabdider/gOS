@@ -96,7 +96,25 @@ jobs:
           settings = json.loads((root / 'shared/settings.json').read_text())
           assert settings.get('gptKey', '') == ''
           settings['gptKey'] = ''
+          # Shared demo settings predate the configurable Filtered Events table.
+          # Take only its column definitions from the exact candidate's public settings.
+          source = root / 'public/settings.json'
+          assert source.is_file() and not source.is_symlink(), 'Missing public column settings'
+          columns = json.loads(source.read_text()).get('filteredEventsColumns')
+          assert isinstance(columns, list) and 0 < len(columns) <= 250, 'Missing or invalid Filtered Events columns'
+          ids = set()
+          for column in columns:
+              assert isinstance(column, dict), 'Invalid column definition'
+              for key in ['id', 'title']:
+                  assert isinstance(column.get(key), str) and column[key].strip(), 'Missing column identity or title'
+              assert column['id'] not in ids, 'Duplicate column ID'
+              ids.add(column['id'])
+              path = column.get('dataIndex')
+              path = [path] if isinstance(path, str) else path
+              assert isinstance(path, list) and path and all(isinstance(part, str) and part.strip() for part in path), 'Invalid column data path'
+          settings['filteredEventsColumns'] = columns
           (site / 'settings.json').write_text(json.dumps(settings))
+          assert json.loads((site / 'settings.json').read_text())['filteredEventsColumns'] == columns
           assert not (site / 'CNAME').exists()
           (site / '.nojekyll').touch()
           marker = dict(repository='shihabdider/gOS', url='https://shihabdider.github.io/gOS/',
