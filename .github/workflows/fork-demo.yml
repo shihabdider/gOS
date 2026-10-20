@@ -1,0 +1,123 @@
+name: Fork demo
+run-name: demo-${{ inputs.request }}-${{ inputs.candidate }}
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        required: true
+        type: string
+      tree:
+        required: true
+        type: string
+      branch:
+        required: true
+        type: string
+      request:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: fork-demo
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'shihabdider/gOS' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.candidate }}
+          persist-credentials: false
+      - name: Validate exact candidate
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          TREE: ${{ inputs.tree }}
+          BRANCH: ${{ inputs.branch }}
+          REQUEST: ${{ inputs.request }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$TREE" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BRANCH" =~ ^feature/[a-z0-9][a-z0-9-]{0,80}$ ]]
+          [[ "$REQUEST" =~ ^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '23.11.1'
+      - name: Install locked dependencies
+        run: yarn install --frozen-lockfile
+      - name: Build exact source
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          REACT_APP_RELEASE_TAG: demo-${{ inputs.candidate }}
+          REACT_APP_RELEASE_COMMIT: ${{ inputs.candidate }}
+          PUBLIC_URL: /gOS
+          GENERATE_SOURCEMAP: 'false'
+        run: CI=false yarn build
+      - name: Stage only the public demo and credential-free settings
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+          TREE: ${{ inputs.tree }}
+          BRANCH: ${{ inputs.branch }}
+          REQUEST: ${{ inputs.request }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path('.')
+          site = root / 'site'
+          assert not site.exists()
+          site.mkdir()
+          def copy(source, target):
+              assert source.exists() and not source.is_symlink()
+              if source.is_dir():
+                  assert not any(p.is_symlink() for p in source.rglob('*'))
+                  shutil.copytree(source, target)
+              else:
+                  shutil.copyfile(source, target)
+          for name in ['index.html', 'static', 'asset-manifest.json', 'favicon.ico', 'favicon-16x16.png',
+                       'favicon-32x32.png', 'logo192.png', 'logo512.png', 'manifest.json', 'robots.txt',
+                       'apple-touch-icon.png', 'android-chrome-192x192.png', 'android-chrome-512x512.png',
+                       'browserconfig.xml', 'mstile-150x150.png', 'safari-pinned-tab.svg', 'site.webmanifest',
+                       'igvGenomes.json', 'workers']:
+              if (root / 'build' / name).exists(): copy(root / 'build' / name, site / name)
+          assert (site / 'index.html').is_file() and (site / 'static').is_dir()
+          for name in ['datasets.json', 'datafiles.json', 'cytobands', 'genes',
+                       'COSMIC_v3.4_ID_GRCh37.txt', 'COSMIC_v3.4_SBS_GRCh37.txt']:
+              copy(root / 'shared' / name, site / name)
+          datasets = json.loads((site / 'datasets.json').read_text())
+          assert datasets == [{'id': 'demo', 'title': 'DEMO Dataset', 'datafilesPath': 'datafiles.json', 'commonPath': 'common/', 'dataPath': 'data/'}]
+          records = json.loads((site / 'datafiles.json').read_text())
+          assert len(records) == 1 and records[0]['pair'] == 'demo'
+          (site / 'data').mkdir()
+          copy(root / 'shared/data/demo', site / 'data/demo')
+          settings = json.loads((root / 'shared/settings.json').read_text())
+          assert settings.get('gptKey', '') == ''
+          settings['gptKey'] = ''
+          (site / 'settings.json').write_text(json.dumps(settings))
+          assert not (site / 'CNAME').exists()
+          (site / '.nojekyll').touch()
+          marker = dict(repository='shihabdider/gOS', url='https://shihabdider.github.io/gOS/',
+                        commit=os.environ['CANDIDATE'], tree=os.environ['TREE'], branch=os.environ['BRANCH'],
+                        requestId=os.environ['REQUEST'], runId=int(os.environ['GITHUB_RUN_ID']),
+                        workflowCommit=os.environ['GITHUB_SHA'])
+          (site / 'demo-revision.json').write_text(json.dumps(marker))
+          PY
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
